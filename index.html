@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QC Trend Analyzer - Injectables</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Font: Roboto -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <!-- Chart.js Annotation Plugin CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.0.2/dist/chartjs-plugin-annotation.min.js"></script>
+    <!-- SweetAlert2 CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <!-- jsPDF CDN for simulated PDF export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables (will be initialized on DOMContentLoaded)
+        window.firebaseApp = null;
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false; // Flag to indicate Firebase auth is ready
+
+        // Global data storage - these will now be synced with Firestore
+        window.qcData = [];
+        window.auditLog = [];
+        window.products = []; // Product names list
+        window.productParameters = {}; // Product limits object
+
+        // Other global app state
+        window.charts = {};
+        window.currentUserRole = 'QC Analyst';
+        window.editingProduct = null;
+        window.currentReportData = [];
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Set Chart.js default font (can be done early as it doesn't touch specific DOM elements)
+            Chart.defaults.font.family = 'Roboto';
+            Chart.defaults.color = '#4b5563'; // gray-700
+
+            // Set up all navigation and form event listeners.
+            // These elements are guaranteed to exist when DOMContentLoaded fires.
+            document.getElementById('nav-dashboard')?.addEventListener('click', (e) => { e.preventDefault(); showPanel('dashboard-panel'); });
+            document.getElementById('nav-data-entry')?.addEventListener('click', (e) => { e.preventDefault(); showPanel('data-entry-panel'); });
+            document.getElementById('nav-trend-viewer')?.addEventListener('click', (e) => { e.preventDefault(); showPanel('trend-viewer-panel'); });
+            document.getElementById('nav-report-generator')?.addEventListener('click', (e) => { e.preventDefault(); showPanel('report-generator-panel'); });
+            document.getElementById('nav-audit-trail')?.addEventListener('click', (e) => { e.preventDefault(); showPanel('audit-trail-panel'); });
+            document.getElementById('nav-add-product')?.addEventListener('click', (e) => { e.preventDefault(); showPanel('add-product-panel'); });
+
+            document.getElementById('data-entry-form')?.addEventListener('submit', handleDataEntrySubmit);
+            document.getElementById('simulate-upload-btn')?.addEventListener('click', simulateUpload);
+
+            document.getElementById('trend-product-select')?.addEventListener('change', renderTrendChart);
+            document.getElementById('trend-parameter-select')?.addEventListener('change', renderTrendChart);
+            document.getElementById('trend-date-range-select')?.addEventListener('change', renderTrendChart);
+
+            document.getElementById('apply-filters-btn')?.addEventListener('click', filterReportData);
+            document.getElementById('export-csv-btn')?.addEventListener('click', exportCSV);
+            document.getElementById('export-pdf-btn')?.addEventListener('click', exportPDFSimulated);
+            document.getElementById('email-report-btn')?.addEventListener('click', emailReport);
+
+            document.getElementById('add-product-form')?.addEventListener('submit', handleAddProductSubmit);
+
+            document.getElementById('user-role-select')?.addEventListener('change', async (event) => {
+                const selectedRole = event.target.value;
+                const previousRole = window.currentUserRole;
+
+                if (selectedRole === 'QC Manager') {
+                    const { value: password } = await Swal.fire({
+                        title: 'Enter QC Manager Password',
+                        input: 'password',
+                        inputPlaceholder: 'Password',
+                        inputAttributes: { autocapitalize: 'off', autocorrect: 'off' },
+                        showCancelButton: true,
+                        confirmButtonText: 'Login',
+                        cancelButtonText: 'Cancel',
+                        customClass: {
+                            confirmButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300 mr-2',
+                            cancelButton: 'bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded transition-all duration-300',
+                            popup: 'rounded-lg shadow-xl'
+                        },
+                        buttonsStyling: false,
+                        allowOutsideClick: () => !Swal.isLoading()
+                    });
+
+                    if (password === 'admin00') {
+                        window.currentUserRole = 'QC Manager';
+                        Swal.fire('Success!', 'Logged in as QC Manager.', 'success');
+                        logAudit(`User role changed to: ${window.currentUserRole}`);
+                    } else if (password) {
+                        Swal.fire('Error', 'Incorrect password.', 'error');
+                        event.target.value = previousRole;
+                        logAudit(`Failed login attempt for QC Manager role.`);
+                    } else {
+                        event.target.value = previousRole;
+                        logAudit(`QC Manager role change cancelled.`);
+                    }
+                } else {
+                    window.currentUserRole = selectedRole;
+                    logAudit(`User role changed to: ${window.currentUserRole}`);
+                }
+                applyRolePermissions();
+                filterReportData();
+            });
+
+            // Initialize Firebase and set up data listeners
+            // IMPORTANT: Replace these placeholders with your actual Firebase project's configuration
+            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {}; // Replace with your actual Firebase Config Object
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // Replace with your actual Firebase App ID (from firebaseConfig.appId)
+
+
+            if (Object.keys(firebaseConfig).length > 0) {
+                window.firebaseApp = initializeApp(firebaseConfig);
+                window.db = getFirestore(window.firebaseApp);
+                window.auth = getAuth(window.firebaseApp);
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    try {
+                        await signInWithCustomToken(window.auth, __initial_auth_token);
+                        console.log("Signed in with custom token.");
+                    } catch (error) {
+                        console.error("Error signing in with custom token:", error);
+                        await signInAnonymously(window.auth);
+                        console.log("Signed in anonymously due to custom token error.");
+                    }
+                } else {
+                    await signInAnonymously(window.auth);
+                    console.log("Signed in anonymously.");
+                }
+
+                onAuthStateChanged(window.auth, (user) => {
+                    if (user) {
+                        window.userId = user.uid;
+                        console.log("Firebase Auth Ready. User ID:", window.userId);
+                    } else {
+                        window.userId = null;
+                        console.log("Firebase Auth Ready. No user signed in (anonymous or custom token failed).");
+                    }
+                    window.isAuthReady = true;
+                    setupFirestoreListeners(); // Call setupFirestoreListeners once auth is ready
+                });
+            } else {
+                console.warn("Firebase config not found. Running in local-only mode (data will not persist).");
+                // If no Firebase config, simulate initial data and proceed
+                simulateUpload(); // This will populate local data and trigger initial UI renders
+                window.isAuthReady = true; // Mark auth as ready for local mode
+            }
+        });
+
+        // Function to set up Firestore listeners
+        // This function will be called ONLY AFTER Firebase auth is ready
+        function setupFirestoreListeners() {
+            if (!window.db || !window.isAuthReady) {
+                console.warn("Firestore or Auth not ready, skipping listener setup.");
+                return;
+            }
+
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+            // Listener for QC Data
+            const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
+            onSnapshot(qcCollectionRef, (snapshot) => {
+                window.qcData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                console.log("QC Data updated from Firestore:", window.qcData);
+                // Trigger UI updates after data is fetched
+                updateDashboard();
+                filterReportData();
+            }, (error) => {
+                console.error("Error fetching QC data:", error);
+                Swal.fire('Error', 'Failed to load QC data from database.', 'error');
+            });
+
+            // Listener for Product Limits
+            const productLimitsCollectionRef = collection(window.db, `artifacts/${appId}/public/data/product_limits`);
+            onSnapshot(productLimitsCollectionRef, (snapshot) => {
+                window.products = [];
+                window.productParameters = {};
+                snapshot.docs.forEach(doc => {
+                    const data = doc.data();
+                    window.products.push(data.productName);
+                    window.productParameters[data.productName] = {
+                        'Deliverable Volume (mL)': data.deliverableVolume || null,
+                        'pH': data.ph || null,
+                        'Assay (%)': data.assay || null
+                    };
+                });
+                window.products.sort();
+                console.log("Product Limits updated from Firestore:", window.productParameters);
+                // Trigger UI updates after data is fetched
+                populateDataEntryDropdowns();
+                populateTrendViewerDropdowns();
+                populateReportFilterDropdowns();
+                renderProductLimitsTable();
+                updateDashboard();
+            }, (error) => {
+                console.error("Error fetching product limits:", error);
+                Swal.fire('Error', 'Failed to load product limits from database.', 'error');
+            });
+
+            // Listener for Audit Log (user-specific)
+            if (window.userId) {
+                const auditLogCollectionRef = collection(window.db, `artifacts/${appId}/users/${window.userId}/audit_logs`);
+                // Note: orderBy is commented out as per instructions, but would typically be used for audit logs
+                // const q = query(auditLogCollectionRef, orderBy('timestamp', 'desc'));
+                onSnapshot(auditLogCollectionRef, (snapshot) => {
+                    window.auditLog = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    window.auditLog.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                    console.log("Audit Log updated from Firestore:", window.auditLog);
+                    renderAuditTrail();
+                }, (error) => {
+                    console.error("Error fetching audit log:", error);
+                    Swal.fire('Error', 'Failed to load audit log from database.', 'error');
+                });
+            } else {
+                 console.warn("User ID not available for audit log listener. Audit log will not be persisted.");
+            }
+
+            // Initial UI updates after all listeners are set up and data starts flowing
+            applyRolePermissions();
+            showPanel('dashboard-panel');
+        }
+
+        /**
+         * Adds an entry to the audit log.
+         * Now saves to Firestore.
+         * @param {string} action - Description of the action performed.
+         */
+        async function logAudit(action) {
+            if (!window.db || !window.userId) {
+                console.warn("Firestore or User ID not ready, cannot log audit.");
+                // Fallback to local storage for audit if Firestore not ready
+                const timestamp = new Date().toLocaleString();
+                window.auditLog.push({ timestamp, user: window.currentUserRole, action });
+                renderAuditTrail();
+                return;
+            }
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                await addDoc(collection(window.db, `artifacts/${appId}/users/${window.userId}/audit_logs`), {
+                    timestamp: new Date().toISOString(),
+                    user: window.currentUserRole,
+                    action: action
+                });
+            } catch (e) {
+                console.error("Error adding audit log document: ", e);
+                Swal.fire('Error', 'Failed to log audit entry.', 'error');
+            }
+        }
+
+        /**
+         * Generates a unique ID for data entries.
+         * @returns {string} A unique ID.
+         */
+        function generateUniqueId() {
+            // Firestore generates its own IDs, but we'll keep this for consistency if needed for local operations
+            return Date.now().toString(36) + Math.random().toString(36).substring(2);
+        }
+
+        // --- Panel Management (remains largely the same) ---
+
+        /**
+         * Shows the specified panel and updates navigation links.
+         * @param {string} panelId - The ID of the panel to show (e.g., 'dashboard-panel').
+         */
+        function showPanel(panelId) {
+            document.querySelectorAll('.panel').forEach(panel => {
+                if (panel) { // Add null check for panel itself
+                    panel.style.display = 'none';
+                }
+            });
+            const targetPanel = document.getElementById(panelId);
+            if (targetPanel) { // Add null check for targetPanel
+                targetPanel.style.display = 'block';
+            }
+
+            document.querySelectorAll('.nav-link').forEach(link => {
+                if (link) { // Add null check for link itself
+                    link.classList.remove('active');
+                }
+            });
+            const navLink = document.getElementById(`nav-${panelId.replace('-panel', '')}`);
+            if (navLink) { // Add null check for navLink
+                navLink.classList.add('active');
+            }
+
+            // Re-render charts/tables when their panel becomes active
+            if (panelId === 'dashboard-panel') {
+                updateDashboard();
+            } else if (panelId === 'trend-viewer-panel') {
+                document.getElementById('trend-product-select')?.dispatchEvent(new Event('change'));
+            } else if (panelId === 'report-generator-panel') {
+                populateReportFilterDropdowns();
+                filterReportData();
+            } else if (panelId === 'audit-trail-panel') {
+                renderAuditTrail();
+            } else if (panelId === 'add-product-panel') {
+                renderProductLimitsTable();
+                resetAddProductForm();
+            }
+            logAudit(`Navigated to ${panelId.replace('-panel', ' ')}`);
+        }
+
+        // --- Data Entry Panel Functions ---
+
+        /**
+         * Populates the product dropdown in the data entry form.
+         */
+        function populateDataEntryDropdowns() {
+            const productSelect = document.getElementById('product-select');
+            // Check if productSelect exists before manipulating it
+            if (!productSelect) {
+                console.warn("product-select element not found. Skipping populateDataEntryDropdowns.");
+                return;
+            }
+            productSelect.innerHTML = '';
+
+            window.products.forEach(product => {
+                const option = document.createElement('option');
+                option.value = product;
+                option.textContent = product;
+                productSelect.appendChild(option);
+            });
+
+            if (!productSelect.dataset.listenerAdded) {
+                productSelect.addEventListener('change', updateDataEntryParameterFields);
+                productSelect.dataset.listenerAdded = 'true';
+            }
+            updateDataEntryParameterFields();
+        }
+
+        /**
+         * Dynamically updates parameter input fields based on the selected product.
+         */
+        function updateDataEntryParameterFields() {
+            const productSelect = document.getElementById('product-select');
+            // Check if productSelect exists before proceeding
+            if (!productSelect) {
+                console.warn("product-select element not found. Skipping updateDataEntryParameterFields.");
+                return;
+            }
+            const selectedProduct = productSelect.value;
+            const paramsForProduct = window.productParameters[selectedProduct] || {};
+
+            const dvInput = document.getElementById('deliverable-volume-input');
+            const phInput = document.getElementById('ph-input');
+            const assayInput = document.getElementById('assay-input');
+
+            const dvDiv = document.getElementById('dv-input-group');
+            const phDiv = document.getElementById('ph-input-group');
+            const assayDiv = document.getElementById('assay-input-group');
+
+            // Ensure all elements exist before trying to access their properties
+            if (dvInput) { dvInput.value = ''; dvInput.required = false; }
+            if (dvDiv) dvDiv.style.display = 'none';
+            if (phInput) { phInput.value = ''; phInput.required = false; }
+            if (phDiv) phDiv.style.display = 'none';
+            if (assayInput) { assayInput.value = ''; assayInput.required = false; }
+            if (assayDiv) assayDiv.style.display = 'none';
+
+            if (paramsForProduct['Deliverable Volume (mL)'] && dvDiv && dvInput) {
+                dvDiv.style.display = 'block';
+                dvInput.required = true;
+                if (dvInput.previousElementSibling) dvInput.previousElementSibling.textContent = `Deliverable Volume (${paramsForProduct['Deliverable Volume (mL)'].unit || 'mL'}):`;
+            }
+            if (paramsForProduct['pH'] && phDiv && phInput) {
+                phDiv.style.display = 'block';
+                phInput.required = true;
+                if (phInput.previousElementSibling) phInput.previousElementSibling.textContent = `pH (${paramsForProduct['pH'].unit || ''}):`;
+            }
+            if (paramsForProduct['Assay (%)'] && assayDiv && assayInput) {
+                assayDiv.style.display = 'block';
+                assayInput.required = true;
+                if (assayInput.previousElementSibling) assayInput.previousElementSibling.textContent = `Assay (${paramsForProduct['Assay (%)'].unit || '%'}):`;
+            }
+        }
+
+        /**
+         * Handles the submission of the data entry form.
+         * Now saves to Firestore.
+         * @param {Event} event - The form submission event.
+         */
+        async function handleDataEntrySubmit(event) {
+            event.preventDefault();
+
+            if (!window.db) {
+                Swal.fire('Error', 'Database not initialized. Please refresh or check console for errors.', 'error');
+                return;
+            }
+
+            const product = document.getElementById('product-select')?.value;
+            const batchNo = document.getElementById('batch-no-input')?.value;
+            const dateOfTest = document.getElementById('date-of-test-input')?.value;
+
+            const paramsForProduct = window.productParameters[product];
+            if (!paramsForProduct) {
+                Swal.fire('Error', 'No parameters defined for this product. Please add product limits first.', 'error');
+                return;
+            }
+
+            const entriesToAdd = [];
+            let allFieldsValid = true;
+
+            if (paramsForProduct['Deliverable Volume (mL)']) {
+                const dvInput = document.getElementById('deliverable-volume-input');
+                const dv = dvInput ? parseFloat(dvInput.value) : NaN;
+                if (isNaN(dv)) allFieldsValid = false;
+                entriesToAdd.push({ parameter: 'Deliverable Volume (mL)', value: dv });
+            }
+            if (paramsForProduct['pH']) {
+                const phInput = document.getElementById('ph-input');
+                const ph = phInput ? parseFloat(phInput.value) : NaN;
+                if (isNaN(ph)) allFieldsValid = false;
+                entriesToAdd.push({ parameter: 'pH', value: ph });
+            }
+            if (paramsForProduct['Assay (%)']) {
+                const assayInput = document.getElementById('assay-input');
+                const assay = assayInput ? parseFloat(assayInput.value) : NaN;
+                if (isNaN(assay)) allFieldsValid = false;
+                entriesToAdd.push({ parameter: 'Assay (%)', value: assay });
+            }
+
+            if (!product || !batchNo || !dateOfTest || !allFieldsValid || entriesToAdd.length === 0) {
+                Swal.fire('Error', 'Please fill in all required fields correctly.', 'error');
+                return;
+            }
+
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
+
+                for (const entryData of entriesToAdd) {
+                    const newEntry = {
+                        product,
+                        batchNo,
+                        date: dateOfTest,
+                        parameter: entryData.parameter,
+                        value: entryData.value,
+                        status: 'In-Spec', // Default status, will be updated by checkLimits
+                        enteredBy: window.currentUserRole,
+                        timestamp: new Date().toISOString()
+                    };
+                    // Check limits BEFORE adding to Firestore to determine initial status
+                    const paramLimits = window.productParameters[newEntry.product]?.[newEntry.parameter];
+                    if (paramLimits) {
+                        if (newEntry.value > paramLimits.UCL || newEntry.value < paramLimits.LCL) {
+                            newEntry.status = 'Out-of-Spec';
+                            Swal.fire({
+                                icon: 'warning',
+                                title: 'Deviation Alert!',
+                                text: `Value ${newEntry.value}${paramLimits.unit} for ${newEntry.parameter} in Batch ${newEntry.batchNo} (${newEntry.product}) is out of spec (UCL: ${paramLimits.UCL}${paramLimits.unit}, LCL: ${paramLimits.LCL}${paramLimits.unit}).`,
+                                confirmButtonText: 'Acknowledge',
+                                customClass: {
+                                    confirmButton: 'bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition-all duration-300'
+                                },
+                                buttonsStyling: false
+                            });
+                            logAudit(`Deviation detected: Value ${newEntry.value}${paramLimits.unit} for ${newEntry.parameter} in Batch ${newEntry.batchNo} (${newEntry.product}) is out of spec.`);
+                        }
+                    }
+
+                    await addDoc(qcCollectionRef, newEntry);
+                }
+
+                document.getElementById('data-entry-form')?.reset();
+                updateDataEntryParameterFields();
+                Swal.fire('Success!', 'Data added successfully.', 'success');
+                logAudit(`Added new data for Batch: ${batchNo}, Product: ${product}.`);
+
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                Swal.fire('Error', 'Failed to add data. Please try again.', 'error');
+            }
+        }
+
+        /**
+         * Simulates a CSV/Excel upload by adding predefined sample data for Injectables.
+         * Now saves to Firestore.
+         */
+        async function simulateUpload() {
+            if (!window.db) {
+                Swal.fire('Error', 'Database not initialized. Cannot simulate upload.', 'error');
+                return;
+            }
+
+            Swal.fire({
+                title: 'Simulating Upload...',
+                text: 'Adding sample data to the database.',
+                allowOutsideClick: false,
+                didOpen: () => {
+                    Swal.showLoading();
+                }
+            });
+
+            const sampleBatches = [
+                { product: 'Injectable Product A (Vial 10mL)', batchNo: 'A-001', date: '2024-01-05', dv: 10.05, ph: 7.2, assay: 100.1 },
+                { product: 'Injectable Product A (Vial 10mL)', batchNo: 'A-002', date: '2024-01-10', dv: 9.75, ph: 7.7, assay: 97.5 },
+                { product: 'Injectable Product A (Vial 10mL)', batchNo: 'A-003', date: '2024-01-15', dv: 10.1, ph: 6.8, assay: 101.5 },
+                { product: 'Injectable Product A (Vial 10mL)', batchNo: 'A-004', date: '2024-07-02', dv: 10.0, ph: 7.0, assay: 99.8 },
+
+                { product: 'Injectable Product B (Ampoule 2mL)', batchNo: 'B-001', date: '2024-01-07', dv: 1.95, ph: 6.4, assay: 99.0 },
+                { product: 'Injectable Product B (Ampoule 2mL)', batchNo: 'B-002', date: '2024-01-12', dv: 2.15, ph: 7.0, assay: 102.0 },
+                { product: 'Injectable Product B (Ampoule 2mL)', batchNo: 'B-003', date: '2024-01-18', dv: 2.0, ph: 6.9, assay: 98.5 },
+
+                { product: 'Injectable Product C (Pre-filled Syringe)', batchNo: 'C-001', date: '2024-02-01', dv: 5.05, ph: 6.5, assay: 99.5 },
+                { product: 'Injectable Product C (Pre-filled Syringe)', batchNo: 'C-002', date: '2024-02-05', dv: 4.8, ph: 5.9, assay: 96.0 },
+                { product: 'Injectable Product D (Lyophilized)', batchNo: 'D-001', date: '2024-02-10', dv: null, ph: 7.0, assay: 100.0 },
+                { product: 'Injectable Product D (Lyophilized)', batchNo: 'D-002', date: '2024-02-15', dv: null, ph: 7.9, assay: 96.5 },
+                { product: 'Dyclo Injection', batchNo: 'DC024', date: '2024-07-01', dv: 10.0, ph: 7.0, assay: 99.65 }
+            ];
+
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
+
+                // Clear existing data in Firestore for a fresh simulation (optional, but good for testing)
+                // This is a simplified clear; for production, handle large deletes carefully.
+                const existingDocs = await getDocs(qcCollectionRef);
+                const deletePromises = existingDocs.docs.map(d => deleteDoc(doc(window.db, `artifacts/${appId}/public/data/qc_entries`, d.id)));
+                await Promise.all(deletePromises);
+
+                for (const batch of sampleBatches) {
+                    const baseEntry = {
+                        product: batch.product,
+                        batchNo: batch.batchNo,
+                        date: batch.date,
+                        enteredBy: 'QC Analyst',
+                        timestamp: new Date(batch.date).toISOString()
+                    };
+
+                    const paramsForProduct = window.productParameters[batch.product];
+
+                    if (paramsForProduct && paramsForProduct['Deliverable Volume (mL)']) { // Check for existence of parameter limits
+                        let dvEntry = { ...baseEntry, parameter: 'Deliverable Volume (mL)', value: batch.dv, status: 'In-Spec' };
+                        const limits = paramsForProduct['Deliverable Volume (mL)'];
+                        if (batch.dv !== null && (dvEntry.value > limits.UCL || dvEntry.value < limits.LCL)) dvEntry.status = 'Out-of-Spec';
+                        await addDoc(qcCollectionRef, dvEntry);
+                    }
+                    if (paramsForProduct && paramsForProduct['pH']) { // Check for existence of parameter limits
+                        let phEntry = { ...baseEntry, parameter: 'pH', value: batch.ph, status: 'In-Spec' };
+                        const limits = paramsForProduct['pH'];
+                        if (batch.ph !== null && (phEntry.value > limits.UCL || phEntry.value < limits.LCL)) phEntry.status = 'Out-of-Spec';
+                        await addDoc(qcCollectionRef, phEntry);
+                    }
+                    if (paramsForProduct && paramsForProduct['Assay (%)']) { // Check for existence of parameter limits
+                        let assayEntry = { ...baseEntry, parameter: 'Assay (%)', value: batch.assay, status: 'In-Spec' };
+                        const limits = paramsForProduct['Assay (%)'];
+                        if (batch.assay !== null && (assayEntry.value > limits.UCL || assayEntry.value < limits.LCL)) assayEntry.status = 'Out-of-Spec';
+                        await addDoc(qcCollectionRef, assayEntry);
+                    }
+                }
+                Swal.close();
+                Swal.fire('Simulated Upload', 'Sample data for Injectables has been added to the database.', 'info');
+                logAudit('Simulated CSV/Excel upload of sample data for Injectables.');
+
+            } catch (e) {
+                console.error("Error simulating upload: ", e);
+                Swal.fire('Error', 'Failed to simulate upload. Check console for details.', 'error');
+            }
+        }
+
+        /**
+         * Checks if a data entry value is within its defined UCL/LCL for its product and parameter.
+         * Note: This function is primarily for client-side validation and immediate alerts.
+         * The status is set before adding/updating the document in Firestore.
+         * @param {object} entry - The data entry object.
+         */
+        function checkLimits(entry) {
+            const paramLimits = window.productParameters[entry.product]?.[entry.parameter];
+            if (!paramLimits) return;
+
+            if (entry.value > paramLimits.UCL || entry.value < paramLimits.LCL) {
+                entry.status = 'Out-of-Spec';
+            } else {
+                entry.status = 'In-Spec';
+            }
+        }
+
+        // --- Dashboard Functions (remain largely the same, data from global qcData) ---
+
+        function updateDashboard() {
+            const injectableData = window.qcData.filter(d => window.products.includes(d.product));
+            const batchesTested = new Set(injectableData.map(d => d.batchNo)).size;
+            const deviations = injectableData.filter(d => d.status === 'Out-of-Spec').length;
+            const alertsRaised = deviations;
+
+            const batchesTestedCount = document.getElementById('batches-tested-count');
+            const deviationsCount = document.getElementById('deviations-count');
+            const alertsRaisedCount = document.getElementById('alerts-raised-count');
+
+            if (batchesTestedCount) batchesTestedCount.textContent = batchesTested;
+            if (deviationsCount) deviationsCount.textContent = deviations;
+            if (alertsRaisedCount) alertsRaisedCount.textContent = alertsRaised;
+
+            renderProductAvgChart();
+            renderRecentTrendChart();
+        }
+
+        function renderProductAvgChart() {
+            const productParameterAverages = {};
+
+            window.qcData.forEach(d => {
+                const key = `${d.product} - ${d.parameter}`;
+                if (!productParameterAverages[key]) {
+                    productParameterAverages[key] = { sum: 0, count: 0, unit: window.productParameters[d.product]?.[d.parameter]?.unit || '' };
+                }
+                if (typeof d.value === 'number') {
+                    productParameterAverages[key].sum += d.value;
+                    productParameterAverages[key].count++;
+                }
+            });
+
+            const chartLabels = [];
+            const chartData = [];
+            const chartBackgroundColors = [];
+            const chartBorderColors = [];
+
+            const paramColors = {
+                'Deliverable Volume (mL)': { bg: 'rgba(59, 130, 246, 0.7)', border: 'rgba(37, 99, 235, 1)' },
+                'pH': { bg: 'rgba(34, 197, 94, 0.7)', border: 'rgba(22, 163, 74, 1)' },
+                'Assay (%)': { bg: 'rgba(251, 191, 36, 0.7)', border: 'rgba(217, 119, 6, 1)' }
+            };
+
+            const sortedKeys = Object.keys(productParameterAverages).sort();
+
+            sortedKeys.forEach(key => {
+                const avgInfo = productParameterAverages[key];
+                if (avgInfo.count > 0) {
+                    const [productName, paramName] = key.split(' - ');
+                    chartLabels.push(`${productName.replace('Injectable Product ', 'Prod. ')} - ${paramName.replace(' (mL)', '').replace(' (%)', '')}`);
+                    chartData.push(avgInfo.sum / avgInfo.count);
+                    chartBackgroundColors.push(paramColors[paramName]?.bg || 'rgba(100, 116, 139, 0.7)');
+                    chartBorderColors.push(paramColors[paramName]?.border || 'rgba(71, 85, 105, 1)');
+                }
+            });
+
+            const ctx = document.getElementById('productAvgChart')?.getContext('2d');
+            if (!ctx) {
+                console.warn("productAvgChart canvas context not found. Skipping chart render.");
+                return;
+            }
+
+            if (window.charts.productAvgChart) {
+                window.charts.productAvgChart.destroy();
+            }
+            window.charts.productAvgChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: chartLabels,
+                    datasets: [{
+                        label: 'Average Value',
+                        data: chartData,
+                        backgroundColor: chartBackgroundColors,
+                        borderColor: chartBorderColors,
+                        borderWidth: 1,
+                        borderRadius: 5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: { display: false },
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: { beginAtZero: false, title: { display: true, text: 'Average Value' } },
+                        x: { title: { display: true, text: 'Product & Parameter' }, ticks: { autoSkip: false, maxRotation: 45, minRotation: 45 } }
+                    }
+                }
+            });
+        }
+
+        function renderRecentTrendChart() {
+            const primaryProduct = window.products[0];
+            const defaultTrendParameter = 'Assay (%)';
+
+            const recentAssayData = window.qcData
+                .filter(d => d.product === primaryProduct && d.parameter === defaultTrendParameter)
+                .sort((a, b) => new Date(a.date) - new Date(b.date))
+                .slice(-10);
+
+            const labels = recentAssayData.map(d => `${d.date} (${d.batchNo})`);
+            const data = recentAssayData.map(d => d.value);
+            const statusColors = recentAssayData.map(d => d.status === 'Out-of-Spec' ? 'rgb(239, 68, 68)' : 'rgb(59, 130, 246)');
+
+            const ctx = document.getElementById('recentTrendChart')?.getContext('2d');
+            if (!ctx) {
+                console.warn("recentTrendChart canvas context not found. Skipping chart render.");
+                return;
+            }
+
+            if (window.charts.recentTrendChart) {
+                window.charts.recentTrendChart.destroy();
+            }
+
+            const trendLimits = window.productParameters[primaryProduct]?.[defaultTrendParameter];
+            const annotations = [];
+            if (trendLimits) {
+                annotations.push({
+                    type: 'line', yMin: trendLimits.UCL, yMax: trendLimits.UCL, borderColor: 'rgb(255, 99, 132)', borderWidth: 2, borderDash: [6, 6],
+                    label: { content: `UCL: ${trendLimits.UCL}${trendLimits.unit}`, enabled: true, position: 'end', backgroundColor: 'rgba(255, 99, 132, 0.8)', font: { size: 10 } }
+                }, {
+                    type: 'line', yMin: trendLimits.LCL, yMax: trendLimits.LCL, borderColor: 'rgb(255, 99, 132)', borderWidth: 2, borderDash: [6, 6],
+                    label: { content: `LCL: ${trendLimits.LCL}${trendLimits.unit}`, enabled: true, position: 'end', backgroundColor: 'rgba(255, 99, 132, 0.8)', font: { size: 10 } }
+                });
+            }
+
+            const recentTrendChartTitle = document.getElementById('recentTrendChartTitle'); // Assuming you might add this ID
+            if (recentTrendChartTitle) {
+                recentTrendChartTitle.textContent = `Recent Trends (${defaultTrendParameter})`;
+            }
+
+            window.charts.recentTrendChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: `${defaultTrendParameter} Value`,
+                        data: data,
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                        borderWidth: 2, pointRadius: 5, pointBackgroundColor: statusColors, pointBorderColor: 'white', pointBorderWidth: 2,
+                        fill: true, tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: false }, legend: { display: false }, annotation: { annotations: annotations } },
+                    scales: {
+                        y: {
+                            beginAtZero: false, title: { display: true, text: `Value ${trendLimits ? trendLimits.unit : ''}` },
+                            suggestedMin: trendLimits ? trendLimits.LCL - (trendLimits.UCL - trendLimits.LCL) * 0.1 : undefined,
+                            suggestedMax: trendLimits ? trendLimits.UCL + (trendLimits.UCL - trendLimits.LCL) * 0.1 : undefined,
+                        },
+                        x: { title: { display: true, text: 'Test Date (Batch No.)' } }
+                    }
+                }
+            });
+        }
+
+        // --- Trend Viewer Functions (remain largely the same, data from global qcData) ---
+
+        function populateTrendViewerDropdowns() {
+            const trendProductSelect = document.getElementById('trend-product-select');
+            const trendParameterSelect = document.getElementById('trend-parameter-select');
+
+            if (!trendProductSelect || !trendParameterSelect) {
+                console.warn("Trend viewer dropdowns not found. Skipping populateTrendViewerDropdowns.");
+                return;
+            }
+
+            trendProductSelect.innerHTML = '<option value="all">All Products</option>';
+            trendParameterSelect.innerHTML = '';
+
+            window.products.forEach(product => {
+                const option = document.createElement('option');
+                option.value = product;
+                option.textContent = product;
+                trendProductSelect.appendChild(option);
+            });
+
+            const allParameters = new Set();
+            Object.values(window.productParameters).forEach(params => {
+                Object.keys(params).forEach(paramName => {
+                    allParameters.add(paramName);
+                });
+            });
+
+            Array.from(allParameters).sort().forEach(param => {
+                const option = document.createElement('option');
+                option.value = param;
+                option.textContent = param;
+                trendParameterSelect.appendChild(option);
+            });
+
+            if (Array.from(allParameters).includes('Assay (%)')) {
+                trendParameterSelect.value = 'Assay (%)';
+            } else if (Array.from(allParameters).length > 0) {
+                trendParameterSelect.value = Array.from(allParameters)[0];
+            }
+        }
+
+        function getFilteredTrendData() {
+            const trendProductSelect = document.getElementById('trend-product-select');
+            const trendParameterSelect = document.getElementById('trend-parameter-select');
+            const trendDateRangeSelect = document.getElementById('trend-date-range-select');
+
+            if (!trendProductSelect || !trendParameterSelect || !trendDateRangeSelect) {
+                console.warn("Trend viewer filter elements not found. Returning empty data.");
+                return [];
+            }
+
+            const selectedProduct = trendProductSelect.value;
+            const selectedParameter = trendParameterSelect.value;
+            const selectedDateRange = trendDateRangeSelect.value;
+
+            let filteredData = window.qcData.filter(d => d.parameter === selectedParameter);
+
+            if (selectedProduct !== 'all') {
+                filteredData = filteredData.filter(d => d.product === selectedProduct);
+            }
+
+            const now = new Date();
+            filteredData = filteredData.filter(d => {
+                const testDate = new Date(d.date);
+                switch (selectedDateRange) {
+                    case 'last-30-days': return (now - testDate) / (1000 * 60 * 60 * 24) <= 30;
+                    case 'last-90-days': return (now - testDate) / (1000 * 60 * 60 * 24) <= 90;
+                    case 'this-year': return testDate.getFullYear() === now.getFullYear();
+                    case 'all': default: return true;
+                }
+            });
+
+            return filteredData.sort((a, b) => new Date(a.date) - new Date(b.date));
+        }
+
+        function renderTrendChart() {
+            const filteredData = getFilteredTrendData();
+            const selectedProduct = document.getElementById('trend-product-select')?.value;
+            const selectedParameter = document.getElementById('trend-parameter-select')?.value;
+            
+            const paramLimits = selectedProduct !== 'all' ? window.productParameters[selectedProduct]?.[selectedParameter] : null;
+
+            const labels = filteredData.map(d => `${d.date} (${d.batchNo})`);
+            const data = filteredData.map(d => d.value);
+            const statusColors = filteredData.map(d => d.status === 'Out-of-Spec' ? 'rgb(239, 68, 68)' : 'rgb(59, 130, 246)');
+
+            const ctx = document.getElementById('trendChart')?.getContext('2d');
+            if (!ctx) {
+                console.warn("trendChart canvas context not found. Skipping chart render.");
+                return;
+            }
+
+            if (window.charts.trendChart) {
+                window.charts.trendChart.destroy();
+            }
+
+            const annotations = [];
+            if (paramLimits) {
+                annotations.push({
+                    type: 'line', yMin: paramLimits.UCL, yMax: paramLimits.UCL, borderColor: 'rgb(255, 99, 132)', borderWidth: 2, borderDash: [6, 6],
+                    label: { content: `UCL: ${paramLimits.UCL}${paramLimits.unit}`, enabled: true, position: 'end', backgroundColor: 'rgba(255, 99, 132, 0.8)', font: { size: 10 } }
+                }, {
+                    type: 'line', yMin: paramLimits.LCL, yMax: paramLimits.LCL, borderColor: 'rgb(255, 99, 132)', borderWidth: 2, borderDash: [6, 6],
+                    label: { content: `LCL: ${paramLimits.LCL}${paramLimits.unit}`, enabled: true, position: 'end', backgroundColor: 'rgba(255, 99, 132, 0.8)', font: { size: 10 } }
+                });
+            }
+
+            const trendChartTitle = document.getElementById('trend-chart-title');
+            if (trendChartTitle) {
+                trendChartTitle.textContent = `Trend Chart for ${selectedParameter} ${selectedProduct !== 'all' ? `(${selectedProduct})` : ''}`;
+            }
+
+            window.charts.trendChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: `${selectedParameter} Value`,
+                        data: data,
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                        borderWidth: 2, pointRadius: 5, pointBackgroundColor: statusColors, pointBorderColor: 'white', pointBorderWidth: 2,
+                        fill: true, tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: false }, legend: { display: false }, annotation: { annotations: annotations } },
+                    scales: {
+                        y: {
+                            beginAtZero: false, title: { display: true, text: `Value ${paramLimits ? paramLimits.unit : ''}` },
+                            suggestedMin: paramLimits ? paramLimits.LCL - (paramLimits.UCL - paramLimits.LCL) * 0.1 : undefined,
+                            suggestedMax: paramLimits ? paramLimits.UCL + (paramLimits.UCL - paramLimits.LCL) * 0.1 : undefined,
+                        },
+                        x: { title: { display: true, text: 'Test Date (Batch No.)' } }
+                    }
+                }
+            });
+        }
+
+        // --- Report Generator Functions (remain largely the same, data from global qcData) ---
+
+        function populateReportFilterDropdowns() {
+            const filterParameterSelect = document.getElementById('filter-parameter');
+            if (!filterParameterSelect) {
+                console.warn("filter-parameter element not found. Skipping populateReportFilterDropdowns.");
+                return;
+            }
+            filterParameterSelect.innerHTML = '<option value="all">All Parameters</option>';
+
+            const allParameters = new Set();
+            Object.values(window.productParameters).forEach(params => {
+                Object.keys(params).forEach(paramName => {
+                    allParameters.add(paramName);
+                });
+            });
+
+            Array.from(allParameters).sort().forEach(param => {
+                const option = document.createElement('option');
+                option.value = param;
+                option.textContent = param;
+                filterParameterSelect.appendChild(option);
+            });
+        }
+
+        function filterReportData() {
+            const filterProductName = document.getElementById('filter-product-name')?.value.toLowerCase() || '';
+            const filterBatchNo = document.getElementById('filter-batch-no')?.value.toLowerCase() || '';
+            const filterTestDate = document.getElementById('filter-test-date')?.value || '';
+            const filterParameter = document.getElementById('filter-parameter')?.value || 'all';
+            const filterStatus = document.getElementById('filter-status')?.value || 'all';
+
+            window.currentReportData = window.qcData.filter(entry => {
+                const matchesProduct = filterProductName === '' || entry.product.toLowerCase().includes(filterProductName);
+                const matchesBatch = filterBatchNo === '' || entry.batchNo.toLowerCase().includes(filterBatchNo);
+                const matchesDate = filterTestDate === '' || entry.date === filterTestDate;
+                const matchesParameter = filterParameter === 'all' || entry.parameter === filterParameter;
+                const matchesStatus = filterStatus === 'all' || entry.status === filterStatus;
+
+                return matchesProduct && matchesBatch && matchesDate && matchesParameter && matchesStatus;
+            });
+
+            renderReportTable();
+            logAudit('Applied filters to Report Generator.');
+        }
+
+        function renderReportTable() {
+            const tableBody = document.getElementById('report-table-body');
+            if (!tableBody) {
+                console.warn("report-table-body element not found. Skipping renderReportTable.");
+                return;
+            }
+            tableBody.innerHTML = '';
+
+            window.currentReportData.forEach((entry) => {
+                const row = tableBody.insertRow();
+                row.classList.add('hover:bg-gray-50', 'transition-colors', 'duration-150');
+
+                row.insertCell().textContent = entry.product;
+                row.insertCell().textContent = entry.batchNo;
+                row.insertCell().textContent = entry.date;
+                row.insertCell().textContent = entry.parameter;
+                
+                const unit = window.productParameters[entry.product]?.[entry.parameter]?.unit || '';
+                row.insertCell().textContent = `${entry.value} ${unit}`;
+
+                const statusCell = row.insertCell();
+                statusCell.textContent = entry.status;
+                statusCell.classList.add(entry.status === 'Out-of-Spec' ? 'text-red-600' : 'text-green-600', 'font-medium');
+
+                row.insertCell().textContent = entry.enteredBy;
+
+                const actionsCell = row.insertCell();
+                actionsCell.classList.add('edit-delete-column');
+
+                const editButton = document.createElement('button');
+                editButton.textContent = 'Edit';
+                editButton.classList.add('btn-action-yellow', 'mr-2');
+                editButton.onclick = () => editDataEntry(entry.id);
+                actionsCell.appendChild(editButton);
+
+                const deleteButton = document.createElement('button');
+                deleteButton.textContent = 'Delete';
+                deleteButton.classList.add('btn-action-red');
+                deleteButton.onclick = () => deleteDataEntry(entry.id);
+                actionsCell.appendChild(deleteButton);
+            });
+            applyRolePermissions();
+        }
+
+        /**
+         * Handles editing a data entry.
+         * Now updates in Firestore.
+         * @param {string} id - The ID of the entry to edit (Firestore Document ID).
+         */
+        async function editDataEntry(id) {
+            if (!window.db) {
+                Swal.fire('Error', 'Database not initialized. Cannot edit data.', 'error');
+                return;
+            }
+
+            const entryToEdit = window.qcData.find(d => d.id === id);
+            if (!entryToEdit) {
+                Swal.fire('Error', 'Data entry not found.', 'error');
+                return;
+            }
+
+            const paramLimits = window.productParameters[entryToEdit.product]?.[entryToEdit.parameter];
+            const unit = paramLimits?.unit || '';
+
+            Swal.fire({
+                title: 'Edit Data Entry',
+                html: `
+                    <div class="text-left space-y-3">
+                        <div>
+                            <label for="swal-product" class="block text-sm font-medium text-gray-700">Product Name:</label>
+                            <input id="swal-product" class="swal2-input" value="${entryToEdit.product}" readonly>
+                        </div>
+                        <div>
+                            <label for="swal-batch" class="block text-sm font-medium text-gray-700">Batch No.:</label>
+                            <input id="swal-batch" class="swal2-input" value="${entryToEdit.batchNo}" readonly>
+                        </div>
+                        <div>
+                            <label for="swal-date" class="block text-sm font-medium text-gray-700">Test Date:</label>
+                            <input type="date" id="swal-date" class="swal2-input" value="${entryToEdit.date}">
+                        </div>
+                        <div>
+                            <label for="swal-parameter" class="block text-sm font-medium text-gray-700">Parameter Type:</label>
+                            <input id="swal-parameter" class="swal2-input" value="${entryToEdit.parameter}" readonly>
+                        </div>
+                        <div>
+                            <label for="swal-value" class="block text-sm font-medium text-gray-700">Value (${unit}):</label>
+                            <input type="number" step="0.01" id="swal-value" class="swal2-input" value="${entryToEdit.value}">
+                        </div>
+                        <div>
+                            <label for="swal-analyst" class="block text-sm font-medium text-gray-700">QC Analyst:</label>
+                            <input id="swal-analyst" class="swal2-input" value="${entryToEdit.enteredBy}" readonly>
+                        </div>
+                    </div>
+                `,
+                focusConfirm: false,
+                showCancelButton: true,
+                confirmButtonText: 'Save Changes',
+                cancelButtonText: 'Cancel',
+                customClass: {
+                    confirmButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300 mr-2',
+                    cancelButton: 'bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded transition-all duration-300',
+                    popup: 'rounded-lg shadow-xl'
+                },
+                buttonsStyling: false,
+                preConfirm: () => {
+                    const dateInput = Swal.getPopup()?.querySelector('#swal-date');
+                    const valueInput = Swal.getPopup()?.querySelector('#swal-value');
+                    
+                    const date = dateInput ? dateInput.value : '';
+                    const value = valueInput ? parseFloat(valueInput.value) : NaN;
+
+                    if (!date || isNaN(value)) {
+                        Swal.showValidationMessage(`Please enter valid date and value`);
+                        return false;
+                    }
+                    return { date, value };
+                }
+            }).then(async (result) => {
+                if (result.isConfirmed) {
+                    const { date, value } = result.value;
+                    const oldEntry = { ...entryToEdit }; // Copy for audit
+
+                    const updatedFields = {
+                        date: date,
+                        value: value,
+                        timestamp: new Date().toISOString()
+                    };
+
+                    // Re-check limits to update status
+                    const tempEntry = { ...entryToEdit, ...updatedFields };
+                    checkLimits(tempEntry);
+                    updatedFields.status = tempEntry.status;
+
+                    try {
+                        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                        await updateDoc(doc(window.db, `artifacts/${appId}/public/data/qc_entries`, id), updatedFields);
+                        Swal.fire('Updated!', 'Data entry has been updated.', 'success');
+                        logAudit(`Edited data for Batch: ${oldEntry.batchNo}, Product: ${oldEntry.product}, Parameter: ${oldEntry.parameter}. Changed from Value: ${oldEntry.value} to ${value}. Status: ${updatedFields.status}`);
+                    } catch (e) {
+                        console.error("Error updating document: ", e);
+                        Swal.fire('Error', 'Failed to update data. Please try again.', 'error');
+                    }
+                }
+            });
+        }
+
+        /**
+         * Handles deleting a data entry.
+         * Now deletes from Firestore.
+         * @param {string} id - The ID of the entry to delete (Firestore Document ID).
+         */
+        async function deleteDataEntry(id) {
+            if (!window.db) {
+                Swal.fire('Error', 'Database not initialized. Cannot delete data.', 'error');
+                return;
+            }
+
+            Swal.fire({
+                title: 'Are you sure?',
+                text: "You won't be able to revert this!",
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#d33',
+                cancelButtonColor: '#3085d6',
+                confirmButtonText: 'Yes, delete it!',
+                customClass: {
+                    confirmButton: 'bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition-all duration-300 mr-2',
+                    cancelButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300',
+                    popup: 'rounded-lg shadow-xl'
+                },
+                buttonsStyling: false
+            }).then(async (result) => {
+                if (result.isConfirmed) {
+                    const deletedEntry = window.qcData.find(d => d.id === id);
+                    try {
+                        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                        await deleteDoc(doc(window.db, `artifacts/${appId}/public/data/qc_entries`, id));
+                        Swal.fire('Deleted!', 'The data entry has been deleted.', 'success');
+                        if (deletedEntry) {
+                            logAudit(`Deleted data for Batch: ${deletedEntry.batchNo}, Product: ${deletedEntry.product}, Parameter: ${deletedEntry.parameter}, Value: ${deletedEntry.value}`);
+                        }
+                    } catch (e) {
+                        console.error("Error deleting document: ", e);
+                        Swal.fire('Error', 'Failed to delete data. Please try again.', 'error');
+                    }
+                }
+            });
+        }
+
+        /**
+         * Exports the current QC data to a CSV file.
+         */
+        function exportCSV() {
+            if (window.currentReportData.length === 0) {
+                Swal.fire('No Data', 'There is no data to export.', 'info');
+                return;
+            }
+
+            const headers = ['Product Name', 'Batch No.', 'Test Date', 'Parameter', 'Value', 'Unit', 'Status', 'QC Analyst', 'Timestamp'];
+            const rows = window.currentReportData.map(d => [
+                d.product,
+                d.batchNo,
+                d.date,
+                d.parameter,
+                d.value,
+                window.productParameters[d.product]?.[d.parameter]?.unit || '',
+                d.status,
+                d.enteredBy,
+                d.timestamp
+            ]);
+
+            let csvContent = headers.join(',') + '\n';
+            rows.forEach(row => {
+                csvContent += row.map(item => `"${item}"`).join(',') + '\n';
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.setAttribute('download', 'qc_trend_report_injectables.csv');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            Swal.fire('Exported!', 'Data exported to CSV successfully.', 'success');
+            logAudit('Exported data to CSV.');
+        }
+
+        /**
+         * Generates and downloads a PDF of the current report data.
+         * @returns {Promise<string|null>} A promise that resolves with the filename if successful, null otherwise.
+         */
+        async function exportPDFSimulated() {
+            if (window.currentReportData.length === 0) {
+                Swal.fire('No Data', 'There is no data to export.', 'info');
+                return null;
+            }
+
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+
+            let y = 20;
+
+            doc.setFontSize(18);
+            doc.text('QC Trend Report for Injectables', 10, y);
+            y += 10;
+            doc.setFontSize(10);
+            doc.text(`Generated on: ${new Date().toLocaleString()}`, 10, y);
+            y += 5;
+            doc.text(`Generated by: ${window.currentUserRole}`, 10, y);
+            y += 15;
+
+            doc.setFontSize(14);
+            doc.text('QC Data Summary', 10, y);
+            y += 7;
+            const batchesTested = new Set(window.currentReportData.map(d => d.batchNo)).size;
+            const deviations = window.currentReportData.filter(d => d.status === 'Out-of-Spec').length;
+            doc.setFontSize(12);
+            doc.text(`Total Batches Tested: ${batchesTested}`, 10, y);
+            y += 7;
+            doc.text(`Total Deviations: ${deviations}`, 10, y);
+            y += 15;
+
+            doc.setFontSize(14);
+            doc.text('All QC Data Entries', 10, y);
+            y += 10;
+            doc.setFontSize(9);
+
+            const headers = ['Product', 'Batch No.', 'Date', 'Parameter', 'Value', 'Status'];
+            const columnWidths = [45, 25, 25, 45, 25, 25];
+
+            const startX = 10;
+            const lineHeight = 6;
+
+            const drawTableHeaders = () => {
+                let currentX = startX;
+                doc.setFont(undefined, 'bold');
+                headers.forEach((header, i) => {
+                    doc.text(header, currentX, y);
+                    currentX += columnWidths[i];
+                });
+                doc.line(startX, y + 1, startX + columnWidths.reduce((a, b) => a + b, 0), y + 1);
+                doc.setFont(undefined, 'normal');
+            };
+
+            drawTableHeaders();
+
+            window.currentReportData.forEach((entry) => {
+                y += lineHeight;
+
+                const rowData = [
+                    doc.splitTextToSize(entry.product, columnWidths[0] - 2),
+                    entry.batchNo,
+                    entry.date,
+                    doc.splitTextToSize(entry.parameter, columnWidths[3] - 2),
+                    `${entry.value} ${window.productParameters[entry.product]?.[entry.parameter]?.unit || ''}`,
+                    entry.status
+                ];
+
+                let maxLinesInRow = 1;
+                rowData.forEach(cell => {
+                    if (Array.isArray(cell)) {
+                        maxLinesInRow = Math.max(maxLinesInRow, cell.length);
+                    }
+                });
+
+                if (y + (maxLinesInRow * lineHeight) > doc.internal.pageSize.height - 20) {
+                    doc.addPage();
+                    y = 20;
+                    drawTableHeaders();
+                    y += lineHeight;
+                }
+
+                let currentX = startX;
+                rowData.forEach((cell, i) => {
+                    if (Array.isArray(cell)) {
+                        let tempY = y;
+                        cell.forEach(line => {
+                            doc.text(line, currentX, tempY);
+                            tempY += lineHeight;
+                        });
+                    } else {
+                        doc.text(cell, currentX, y);
+                    }
+                    currentX += columnWidths[i];
+                });
+                if (maxLinesInRow > 1) {
+                    y += (maxLinesInRow - 1) * lineHeight;
+                }
+            });
+
+            const filename = `qc_trend_report_injectables_${new Date().toISOString().slice(0,10)}.pdf`;
+            doc.save(filename);
+
+            Swal.fire('PDF Generated!', 'A PDF file containing the QC report has been downloaded. You can now attach it to your email.', 'info');
+            logAudit('PDF export initiated using jsPDF.');
+            return filename;
+        }
+
+        /**
+         * Initiates the email sending process with the current report data.
+         */
+        async function emailReport() {
+            if (window.currentReportData.length === 0) {
+                Swal.fire('No Data', 'There is no data to email. Please apply filters to generate a report first.', 'info');
+                return;
+            }
+
+            const pdfFilename = await exportPDFSimulated();
+
+            if (!pdfFilename) {
+                return;
+            }
+
+            const filterProductName = document.getElementById('filter-product-name')?.value || '';
+            const filterBatchNo = document.getElementById('filter-batch-no')?.value || '';
+            const filterTestDate = document.getElementById('filter-test-date')?.value || '';
+            const filterParameter = document.getElementById('filter-parameter')?.value || 'all';
+            const filterStatus = document.getElementById('filter-status')?.value || 'all';
+
+            const batchesTested = new Set(window.currentReportData.map(d => d.batchNo)).size;
+            const deviations = window.currentReportData.filter(d => d.status === 'Out-of-Spec').length;
+
+            let emailSubject = `QC Report - ${new Date().toLocaleDateString()}`;
+            // Use \r\n for newlines for better email client compatibility
+            let emailBody = `Dear Manager,\r\n\r\nAttached is the QC Report for Injectables, filtered by:\r\n\r\n`;
+
+            if (filterProductName) emailBody += `- Product Name: ${filterProductName}\r\n`;
+            if (filterBatchNo) emailBody += `- Batch No.: ${filterBatchNo}\r\n`;
+            if (filterTestDate) emailBody += `- Test Date: ${filterTestDate}\r\n`;
+            if (filterParameter !== 'all') emailBody += `- Parameter: ${filterParameter}\r\n`;
+            if (filterStatus !== 'all') emailBody += `- Status: ${filterStatus}\r\n`;
+            if (!filterProductName && !filterBatchNo && !filterTestDate && filterParameter === 'all' && filterStatus === 'all') {
+                emailBody += `- Filters: All Data\r\n`;
+            }
+
+            emailBody += `\r\nQC Data Summary (for filtered data):\r\n`;
+            emailBody += `- Total Batches Tested: ${batchesTested}\r\n`;
+            emailBody += `- Total Deviations: ${deviations}\r\n\r\n`;
+            emailBody += `The report PDF (${pdfFilename}) has been downloaded to your device. Please attach it manually to this email before sending.\r\n\r\n`;
+            emailBody += `Best regards,\r\n${window.currentUserRole}`;
+
+            const encodedSubject = encodeURIComponent(emailSubject);
+            const encodedBody = encodeURIComponent(emailBody);
+
+            const { value: recipientEmail } = await Swal.fire({
+                title: 'Send Report via Email',
+                input: 'email',
+                inputLabel: 'Recipient Email Address',
+                inputPlaceholder: 'Enter email address',
+                inputValue: '',
+                showCancelButton: true,
+                confirmButtonText: 'Open Email Client',
+                cancelButtonText: 'Cancel',
+                customClass: {
+                    confirmButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300 mr-2',
+                    cancelButton: 'bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded transition-all duration-300',
+                    popup: 'rounded-lg shadow-xl'
+                },
+                buttonsStyling: false
+            });
+
+            if (recipientEmail) {
+                const mailtoLink = `mailto:${recipientEmail}?subject=${encodedSubject}&body=${encodedBody}`;
+                console.log("Generated mailto link:", mailtoLink);
+                window.open(mailtoLink);
+                logAudit(`Initiated email for report to ${recipientEmail}.`);
+            } else {
+                Swal.fire('Cancelled', 'Email sending cancelled.', 'info');
+                logAudit('Email report cancelled by user.');
+            }
+        }
+
+        // --- Audit Trail Functions (data from global auditLog) ---
+
+        function renderAuditTrail() {
+            const auditLogList = document.getElementById('audit-log-list');
+            if (!auditLogList) {
+                console.warn("audit-log-list element not found. Skipping renderAuditTrail.");
+                return;
+            }
+            auditLogList.innerHTML = '';
+
+            window.auditLog.forEach(entry => {
+                const listItem = document.createElement('li');
+                listItem.classList.add('bg-white', 'p-3', 'rounded-md', 'shadow-sm', 'border', 'border-gray-100');
+                listItem.innerHTML = `
+                    <p class="text-sm text-gray-500">${new Date(entry.timestamp).toLocaleString()} - <span class="font-medium text-blue-700">${entry.user}</span></p>
+                    <p class="text-gray-800">${entry.action}</p>
+                `;
+                auditLogList.appendChild(listItem);
+            });
+        }
+
+        // --- Add Product Panel Functions ---
+
+        /**
+         * Handles the submission of the Add Product form.
+         * Now saves/updates in Firestore.
+         * @param {Event} event - The form submission event.
+         */
+        async function handleAddProductSubmit(event) {
+            event.preventDefault();
+
+            if (!window.db) {
+                Swal.fire('Error', 'Database not initialized. Cannot add/update product.', 'error');
+                return;
+            }
+
+            const newProductNameInput = document.getElementById('new-product-name-input');
+            const dvUCLInput = document.getElementById('dv-ucl-input');
+            const dvLCLInput = document.getElementById('dv-lcl-input');
+            const phUCLInput = document.getElementById('ph-ucl-input');
+            const phLCLInput = document.getElementById('ph-lcl-input');
+            const assayUCLInput = document.getElementById('assay-ucl-input');
+            const assayLCLInput = document.getElementById('assay-lcl-input');
+
+            const newProductName = newProductNameInput?.value.trim() || '';
+            const dvUCL = dvUCLInput ? parseFloat(dvUCLInput.value) : NaN;
+            const dvLCL = dvLCLInput ? parseFloat(dvLCLInput.value) : NaN;
+            const phUCL = phUCLInput ? parseFloat(phUCLInput.value) : NaN;
+            const phLCL = phLCLInput ? parseFloat(phLCLInput.value) : NaN;
+            const assayUCL = assayUCLInput ? parseFloat(assayUCLInput.value) : NaN;
+            const assayLCL = assayLCLInput ? parseFloat(assayLCLInput.value) : NaN;
+
+            if (!newProductName || isNaN(dvUCL) || isNaN(dvLCL) || isNaN(phUCL) || isNaN(phLCL) || isNaN(assayUCL) || isNaN(assayLCL)) {
+                Swal.fire('Error', 'Please fill in all product and limit fields correctly.', 'error');
+                return;
+            }
+
+            if (dvLCL >= dvUCL || phLCL >= phUCL || assayLCL >= assayUCL) {
+                Swal.fire('Error', 'Lower Control Limit (LCL) must be less than Upper Control Limit (UCL) for all parameters.', 'error');
+                return;
+            }
+
+            const productData = {
+                productName: newProductName,
+                deliverableVolume: { UCL: dvUCL, LCL: dvLCL, unit: 'mL' },
+                ph: { UCL: phUCL, LCL: phLCL, unit: '' },
+                assay: { UCL: assayUCL, LCL: assayLCL, unit: '%' }
+            };
+
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const productLimitsCollectionRef = collection(window.db, `artifacts/${appId}/public/data/product_limits`);
+                
+                let actionType = 'Added';
+                // Check if product already exists to determine if it's an update
+                // Use getDocs with a query instead of relying on window.products for existence check
+                const existingProductQuery = query(productLimitsCollectionRef, where("productName", "==", newProductName));
+                const existingProductSnapshot = await getDocs(existingProductQuery);
+
+                if (!existingProductSnapshot.empty) {
+                    actionType = 'Updated';
+                    const docToUpdate = existingProductSnapshot.docs[0];
+                    await updateDoc(doc(window.db, `artifacts/${appId}/public/data/product_limits`, docToUpdate.id), productData);
+                } else {
+                    await addDoc(productLimitsCollectionRef, productData);
+                }
+
+                resetAddProductForm();
+                Swal.fire('Success!', `Product "${newProductName}" and its limits have been ${actionType.toLowerCase()}.`, 'success');
+                logAudit(`${actionType} product: ${newProductName} with limits.`);
+
+            } catch (e) {
+                console.error("Error adding/updating product document: ", e);
+                Swal.fire('Error', 'Failed to add/update product. Please try again.', 'error');
+            }
+        }
+
+        function renderProductLimitsTable() {
+            const tableBody = document.getElementById('product-limits-table-body');
+            if (!tableBody) {
+                console.warn("product-limits-table-body element not found. Skipping renderProductLimitsTable.");
+                return;
+            }
+            tableBody.innerHTML = '';
+
+            const sortedProducts = [...window.products].sort();
+
+            sortedProducts.forEach(productName => {
+                const params = window.productParameters[productName];
+                if (!params) return;
+
+                const row = tableBody.insertRow();
+                row.classList.add('hover:bg-gray-50', 'transition-colors', 'duration-150');
+
+                row.insertCell().textContent = productName;
+
+                const dvCell = row.insertCell();
+                if (params['Deliverable Volume (mL)']) {
+                    dvCell.textContent = `UCL: ${params['Deliverable Volume (mL)'].UCL}${params['Deliverable Volume (mL)'].unit}, LCL: ${params['Deliverable Volume (mL)'].LCL}${params['Deliverable Volume (mL)'].unit}`;
+                } else {
+                    dvCell.textContent = 'N/A';
+                }
+
+                const phCell = row.insertCell();
+                if (params['pH']) {
+                    phCell.textContent = `UCL: ${params['pH'].UCL}${params['pH'].unit}, LCL: ${params['pH'].LCL}${params['pH'].unit}`;
+                } else {
+                    phCell.textContent = 'N/A';
+                }
+
+                const assayCell = row.insertCell();
+                if (params['Assay (%)']) {
+                    assayCell.textContent = `UCL: ${params['Assay (%)'].UCL}${params['Assay (%)'].unit}, LCL: ${params['Assay (%)'].LCL}${params['Assay (%)'].unit}`;
+                } else {
+                    assayCell.textContent = 'N/A';
+                }
+
+                const actionsCell = row.insertCell();
+                actionsCell.classList.add('product-crud-column');
+
+                const editButton = document.createElement('button');
+                editButton.textContent = 'Edit';
+                editButton.classList.add('btn-action-yellow', 'mr-2');
+                editButton.onclick = () => editProductLimits(productName);
+                actionsCell.appendChild(editButton);
+
+                const deleteButton = document.createElement('button');
+                deleteButton.textContent = 'Delete';
+                deleteButton.classList.add('btn-action-red');
+                deleteButton.onclick = () => deleteProductLimits(productName);
+                actionsCell.appendChild(deleteButton);
+            });
+            applyRolePermissions();
+        }
+
+        function editProductLimits(productName) {
+            const params = window.productParameters[productName];
+            if (!params) {
+                Swal.fire('Error', 'Product not found for editing.', 'error');
+                return;
+            }
+
+            const newProductNameInput = document.getElementById('new-product-name-input');
+            const addProductSubmitBtn = document.getElementById('add-product-submit-btn');
+            const dvUCLInput = document.getElementById('dv-ucl-input');
+            const dvLCLInput = document.getElementById('dv-lcl-input');
+            const phUCLInput = document.getElementById('ph-ucl-input');
+            const phLCLInput = document.getElementById('ph-lcl-input');
+            const assayUCLInput = document.getElementById('assay-ucl-input');
+            const assayLCLInput = document.getElementById('assay-lcl-input');
+
+
+            if (newProductNameInput) {
+                newProductNameInput.value = productName;
+                newProductNameInput.readOnly = true;
+            }
+            if (addProductSubmitBtn) {
+                addProductSubmitBtn.textContent = 'Update Product';
+            }
+            window.editingProduct = productName;
+
+            if (dvUCLInput) dvUCLInput.value = params['Deliverable Volume (mL)']?.UCL || '';
+            if (dvLCLInput) dvLCLInput.value = params['Deliverable Volume (mL)']?.LCL || '';
+            if (phUCLInput) phUCLInput.value = params['pH']?.UCL || '';
+            if (phLCLInput) phLCLInput.value = params['pH']?.LCL || '';
+            if (assayUCLInput) assayUCLInput.value = params['Assay (%)']?.UCL || '';
+            if (assayLCLInput) assayLCLInput.value = params['Assay (%)']?.LCL || '';
+
+            logAudit(`Started editing limits for product: ${productName}`);
+        }
+
+        /**
+         * Deletes a product and its associated data and limits from Firestore.
+         * @param {string} productName - The name of the product to delete.
+         */
+        async function deleteProductLimits(productName) {
+            if (!window.db) {
+                Swal.fire('Error', 'Database not initialized. Cannot delete product.', 'error');
+                return;
+            }
+
+            Swal.fire({
+                title: 'Are you sure?',
+                text: `You are about to delete product "${productName}" and ALL its associated QC data. This action cannot be undone!`,
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#d33',
+                cancelButtonColor: '#3085d6',
+                confirmButtonText: 'Yes, delete it!',
+                customClass: {
+                    confirmButton: 'bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition-all duration-300 mr-2',
+                    cancelButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300',
+                    popup: 'rounded-lg shadow-xl'
+                },
+                buttonsStyling: false
+            }).then(async (result) => {
+                if (result.isConfirmed) {
+                    try {
+                        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                        const productLimitsCollectionRef = collection(window.db, `artifacts/${appId}/public/data/product_limits`);
+                        const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
+
+                        // Find and delete the product limits document
+                        const productDocToDelete = (await getDocs(query(productLimitsCollectionRef, where("productName", "==", productName)))).docs[0];
+                        if (productDocToDelete) {
+                            await deleteDoc(doc(window.db, `artifacts/${appId}/public/data/product_limits`, productDocToDelete.id));
+                        }
+
+                        // Delete associated QC data
+                        const qcDocsToDelete = (await getDocs(query(qcCollectionRef, where("product", "==", productName)))).docs;
+                        const deletePromises = qcDocsToDelete.map(d => deleteDoc(doc(window.db, `artifacts/${appId}/public/data/qc_entries`, d.id)));
+                        await Promise.all(deletePromises);
+
+                        Swal.fire('Deleted!', `Product "${productName}" and its data have been deleted.`, 'success');
+                        logAudit(`Deleted product: ${productName} and all its associated data.`);
+
+                    } catch (e) {
+                        console.error("Error deleting product and associated data: ", e);
+                        Swal.fire('Error', 'Failed to delete product and its data. Please try again.', 'error');
+                    }
+                }
+            });
+        }
+
+        function resetAddProductForm() {
+            const addProductForm = document.getElementById('add-product-form');
+            const newProductNameInput = document.getElementById('new-product-name-input');
+            const addProductSubmitBtn = document.getElementById('add-product-submit-btn');
+
+            if (addProductForm) addProductForm.reset();
+            if (newProductNameInput) newProductNameInput.readOnly = false;
+            if (addProductSubmitBtn) addProductSubmitBtn.textContent = 'Add Product';
+            window.editingProduct = null;
+        }
+
+        // --- User Role Management (remains largely the same) ---
+
+        function applyRolePermissions() {
+            const reportTableActionButtons = document.querySelectorAll('#report-table-body .btn-action-yellow, #report-table-body .btn-action-red');
+            const productLimitsTableActionButtons = document.querySelectorAll('#product-limits-table-body .btn-action-yellow, #product-limits-table-body .btn-action-red');
+
+            const simulateUploadBtn = document.getElementById('simulate-upload-btn');
+            const emailReportBtn = document.getElementById('email-report-btn');
+
+            const reportFiltersContainer = document.getElementById('report-filters-container');
+
+            // Safely access navigation elements
+            const navDashboard = document.getElementById('nav-dashboard');
+            const navDataEntry = document.getElementById('nav-data-entry');
+            const navTrendViewer = document.getElementById('nav-trend-viewer');
+            const navReportGenerator = document.getElementById('nav-report-generator');
+            const navAuditTrail = document.getElementById('nav-audit-trail');
+            const navAddProduct = document.getElementById('nav-add-product');
+
+            if (navDashboard) navDashboard.style.display = 'none';
+            if (navDataEntry) navDataEntry.style.display = 'none';
+            if (navTrendViewer) navTrendViewer.style.display = 'none';
+            if (navReportGenerator) navReportGenerator.style.display = 'none';
+            if (navAuditTrail) navAuditTrail.style.display = 'none';
+            if (navAddProduct) navAddProduct.style.display = 'none';
+
+            reportTableActionButtons.forEach(btn => btn.style.display = 'none');
+            productLimitsTableActionButtons.forEach(btn => btn.style.display = 'none');
+            if (simulateUploadBtn) simulateUploadBtn.style.display = 'none';
+            if (emailReportBtn) emailReportBtn.style.display = 'none';
+            if (reportFiltersContainer) reportFiltersContainer.style.display = 'none';
+
+            document.querySelectorAll('.edit-delete-column').forEach(col => col.style.display = 'none');
+            document.querySelectorAll('.product-crud-column').forEach(col => col.style.display = 'none');
+
+
+            if (window.currentUserRole === 'QC Analyst') {
+                if (navDashboard) navDashboard.style.display = 'block';
+                if (navDataEntry) navDataEntry.style.display = 'block';
+                if (navTrendViewer) navTrendViewer.style.display = 'block';
+                if (navAddProduct) navAddProduct.style.display = 'block'; 
+                if (simulateUploadBtn) simulateUploadBtn.style.display = 'inline-flex'; 
+            } else if (window.currentUserRole === 'QC Manager') {
+                if (navDashboard) navDashboard.style.display = 'block';
+                if (navDataEntry) navDataEntry.style.display = 'block';
+                if (navTrendViewer) navTrendViewer.style.display = 'block';
+                if (navReportGenerator) navReportGenerator.style.display = 'block';
+                if (navAuditTrail) navAuditTrail.style.display = 'block';
+                if (navAddProduct) navAddProduct.style.display = 'block'; 
+                
+                document.querySelectorAll('.edit-delete-column').forEach(col => col.style.display = 'table-cell');
+                reportTableActionButtons.forEach(btn => btn.style.display = 'inline-flex'); 
+                
+                document.querySelectorAll('.product-crud-column').forEach(col => col.style.display = 'table-cell');
+                productLimitsTableActionButtons.forEach(btn => btn.style.display = 'inline-flex'); 
+
+                if (simulateUploadBtn) simulateUploadBtn.style.display = 'inline-flex'; 
+                if (emailReportBtn) emailReportBtn.style.display = 'inline-flex'; 
+                if (reportFiltersContainer) reportFiltersContainer.style.display = 'grid'; 
+            }
+
+            const activePanelId = document.querySelector('.panel.active')?.id;
+            const analystRestrictedPanels = ['report-generator-panel', 'audit-trail-panel'];
+            if (window.currentUserRole === 'QC Analyst' && analystRestrictedPanels.includes(activePanelId)) {
+                showPanel('dashboard-panel');
+            }
+        }
+    </script>
+</body>
+</html>
