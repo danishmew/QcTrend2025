@@ -22,6 +22,20 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // YOUR FIREBASE PROJECT CONFIGURATION (Moved to global scope)
+        const firebaseConfig = {
+            apiKey: "AIzaSyCoF18wrBpmPR4DjbXtfjX6Rq7qsbSo6Nw",
+            authDomain: "qc-trends2025.firebaseapp.com",
+            projectId: "qc-trends2025",
+            storageBucket: "qc-trends2025.firebasestorage.app",
+            messagingSenderId: "559879485741",
+            appId: "1:559879485741:web:9f6aefe16a720e0da3fba4"
+        };
+        // Correctly set using the appId from your config
+        const appId = firebaseConfig.appId; 
+        console.log("Firebase Config being used:", firebaseConfig);
+
+
         // Global Firebase variables (will be initialized on DOMContentLoaded)
         window.firebaseApp = null;
         window.db = null;
@@ -111,47 +125,50 @@
                 filterReportData();
             });
 
-            // Initialize Firebase and set up data listeners
-            // IMPORTANT: Replace these placeholders with your actual Firebase project's configuration
-            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {}; // Replace with your actual Firebase Config Object
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // Replace with your actual Firebase App ID (from firebaseConfig.appId)
-
-
-            if (Object.keys(firebaseConfig).length > 0) {
+            // Check if Firebase config is present (basic check)
+            if (firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId) {
                 window.firebaseApp = initializeApp(firebaseConfig);
                 window.db = getFirestore(window.firebaseApp);
                 window.auth = getAuth(window.firebaseApp);
 
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    try {
-                        await signInWithCustomToken(window.auth, __initial_auth_token);
-                        console.log("Signed in with custom token.");
-                    } catch (error) {
-                        console.error("Error signing in with custom token:", error);
-                        await signInAnonymously(window.auth);
-                        console.log("Signed in anonymously due to custom token error.");
-                    }
-                } else {
-                    await signInAnonymously(window.auth);
-                    console.log("Signed in anonymously.");
-                }
+                // In a deployed environment, __initial_auth_token will not exist.
+                // We'll sign in anonymously by default.
+                await signInAnonymously(window.auth);
+                console.log("Signed in anonymously.");
 
                 onAuthStateChanged(window.auth, (user) => {
                     if (user) {
                         window.userId = user.uid;
                         console.log("Firebase Auth Ready. User ID:", window.userId);
+                        const userIdDisplay = document.getElementById('user-id-display');
+                        if (userIdDisplay) userIdDisplay.textContent = `User ID: ${window.userId}`; // Display user ID
                     } else {
                         window.userId = null;
-                        console.log("Firebase Auth Ready. No user signed in (anonymous or custom token failed).");
+                        console.log("Firebase Auth Ready. No user signed in.");
+                        const userIdDisplay = document.getElementById('user-id-display');
+                        if (userIdDisplay) userIdDisplay.textContent = 'User ID: N/A';
                     }
                     window.isAuthReady = true;
                     setupFirestoreListeners(); // Call setupFirestoreListeners once auth is ready
                 });
             } else {
-                console.warn("Firebase config not found. Running in local-only mode (data will not persist).");
+                console.warn("Firebase config is incomplete. Running in local-only mode (data will not persist).");
+                Swal.fire({
+                    icon: 'warning',
+                    title: 'Firebase Not Configured',
+                    html: 'Firebase configuration is incomplete. The application will run in local-only mode, and data will NOT be saved persistently. Please ensure your `firebaseConfig` object has all necessary properties.',
+                    confirmButtonText: 'Understood',
+                    customClass: {
+                        confirmButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300'
+                    },
+                    buttonsStyling: false
+                });
                 // If no Firebase config, simulate initial data and proceed
                 simulateUpload(); // This will populate local data and trigger initial UI renders
                 window.isAuthReady = true; // Mark auth as ready for local mode
+                // Also ensure UI is initialized even without Firebase listeners
+                applyRolePermissions();
+                showPanel('dashboard-panel');
             }
         });
 
@@ -163,7 +180,8 @@
                 return;
             }
 
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            // Use the appId from the firebaseConfig directly for consistency
+            // const appId = firebaseConfig.appId; // This is already defined globally at the top of the script
 
             // Listener for QC Data
             const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
@@ -206,7 +224,7 @@
             });
 
             // Listener for Audit Log (user-specific)
-            if (window.userId) {
+            if (window.userId) { // Ensure userId is available before setting up audit log listener
                 const auditLogCollectionRef = collection(window.db, `artifacts/${appId}/users/${window.userId}/audit_logs`);
                 // Note: orderBy is commented out as per instructions, but would typically be used for audit logs
                 // const q = query(auditLogCollectionRef, orderBy('timestamp', 'desc'));
@@ -243,7 +261,7 @@
                 return;
             }
             try {
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                // const appId = firebaseConfig.appId; // Use appId from the firebaseConfig directly
                 await addDoc(collection(window.db, `artifacts/${appId}/users/${window.userId}/audit_logs`), {
                     timestamp: new Date().toISOString(),
                     user: window.currentUserRole,
@@ -433,7 +451,7 @@
             }
 
             try {
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                // const appId = firebaseConfig.appId; // Already globally defined
                 const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
 
                 for (const entryData of entriesToAdd) {
@@ -517,7 +535,7 @@
             ];
 
             try {
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                // const appId = firebaseConfig.appId; // Already globally defined
                 const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
 
                 // Clear existing data in Firestore for a fresh simulation (optional, but good for testing)
@@ -1067,7 +1085,7 @@
                     updatedFields.status = tempEntry.status;
 
                     try {
-                        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                        // const appId = firebaseConfig.appId; // Already globally defined
                         await updateDoc(doc(window.db, `artifacts/${appId}/public/data/qc_entries`, id), updatedFields);
                         Swal.fire('Updated!', 'Data entry has been updated.', 'success');
                         logAudit(`Edited data for Batch: ${oldEntry.batchNo}, Product: ${oldEntry.product}, Parameter: ${oldEntry.parameter}. Changed from Value: ${oldEntry.value} to ${value}. Status: ${updatedFields.status}`);
@@ -1108,7 +1126,7 @@
                 if (result.isConfirmed) {
                     const deletedEntry = window.qcData.find(d => d.id === id);
                     try {
-                        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                        // const appId = firebaseConfig.appId; // Already globally defined
                         await deleteDoc(doc(window.db, `artifacts/${appId}/public/data/qc_entries`, id));
                         Swal.fire('Deleted!', 'The data entry has been deleted.', 'success');
                         if (deletedEntry) {
@@ -1415,7 +1433,7 @@
             };
 
             try {
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                // const appId = firebaseConfig.appId; // Already globally defined
                 const productLimitsCollectionRef = collection(window.db, `artifacts/${appId}/public/data/product_limits`);
                 
                 let actionType = 'Added';
@@ -1563,7 +1581,7 @@
             }).then(async (result) => {
                 if (result.isConfirmed) {
                     try {
-                        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                        // const appId = firebaseConfig.appId; // Already globally defined
                         const productLimitsCollectionRef = collection(window.db, `artifacts/${appId}/public/data/product_limits`);
                         const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
 
@@ -1668,5 +1686,430 @@
             }
         }
     </script>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: #f3f4f6; /* gray-100 */
+            color: #374151; /* gray-700 */
+        }
+        .container {
+            max-width: 1200px;
+        }
+        .sidebar {
+            background-color: #1f2937; /* gray-800 */
+            color: #f9fafb; /* gray-50 */
+        }
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            transition: background-color 0.2s;
+        }
+        .nav-link:hover {
+            background-color: #374151; /* gray-700 */
+        }
+        .nav-link.active {
+            background-color: #4b5563; /* gray-600 */
+            font-weight: 500;
+        }
+        .panel {
+            display: none;
+        }
+        .panel.active {
+            display: block;
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .btn-primary {
+            background-color: #2563eb; /* blue-600 */
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            transition: background-color 0.2s;
+        }
+        .btn-primary:hover {
+            background-color: #1d4ed8; /* blue-700 */
+        }
+        .btn-action-yellow {
+            background-color: #f59e0b; /* amber-500 */
+            color: white;
+            padding: 0.4rem 0.8rem;
+            border-radius: 0.4rem;
+            transition: background-color 0.2s;
+        }
+        .btn-action-yellow:hover {
+            background-color: #d97706; /* amber-600 */
+        }
+        .btn-action-red {
+            background-color: #ef4444; /* red-500 */
+            color: white;
+            padding: 0.4rem 0.8rem;
+            border-radius: 0.4rem;
+            transition: background-color 0.2s;
+        }
+        .btn-action-red:hover {
+            background-color: #dc2626; /* red-600 */
+        }
+        input[type="text"],
+        input[type="number"],
+        input[type="date"],
+        select,
+        textarea {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #d1d5db; /* gray-300 */
+            border-radius: 0.375rem;
+            margin-top: 0.25rem;
+            margin-bottom: 0.75rem;
+            box-sizing: border-box;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        th, td {
+            border: 1px solid #e5e7eb; /* gray-200 */
+            padding: 0.75rem;
+            text-align: left;
+        }
+        th {
+            background-color: #f9fafb; /* gray-50 */
+            font-weight: 600;
+            color: #4b5563; /* gray-700 */
+        }
+        .swal2-popup {
+            font-family: 'Roboto', sans-serif;
+        }
+        .swal2-input {
+            border: 1px solid #d1d5db !important;
+            border-radius: 0.375rem !important;
+        }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden">
+
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar w-64 flex-shrink-0 p-6 overflow-y-auto">
+        <div class="text-2xl font-bold mb-8 text-center">QC Analyzer</div>
+        <nav>
+            <ul>
+                <li class="mb-2">
+                    <a href="#" id="nav-dashboard" class="nav-link active">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m0 0l-7 7m7-7v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
+                        Dashboard
+                    </a>
+                </li>
+                <li class="mb-2">
+                    <a href="#" id="nav-data-entry" class="nav-link">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        Data Entry
+                    </a>
+                </li>
+                <li class="mb-2">
+                    <a href="#" id="nav-trend-viewer" class="nav-link">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                        Trend Viewer
+                    </a>
+                </li>
+                <li class="mb-2">
+                    <a href="#" id="nav-report-generator" class="nav-link">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 2v-6m2 9H7a2 2 0 01-2-2V5a2 2 0 012-2h2.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        Report Generator
+                    </a>
+                </li>
+                <li class="mb-2">
+                    <a href="#" id="nav-audit-trail" class="nav-link">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0H9m7 0h-4"></path></svg>
+                        Audit Trail
+                    </a>
+                </li>
+                <li class="mb-2">
+                    <a href="#" id="nav-add-product" class="nav-link">
+                        <svg class="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m0 0h-3m-2 2H6a2 2 0 01-2-2V7a2 2 0 012-2h10a2 2 0 012 2v4m-4 4v-4m0 4h4m-4 0h-4"></path></svg>
+                        Product Limits
+                    </a>
+                </li>
+            </ul>
+        </nav>
+        <div class="mt-8 pt-4 border-t border-gray-700">
+            <label for="user-role-select" class="block text-sm font-medium text-gray-400 mb-2">Current Role:</label>
+            <select id="user-role-select" class="w-full p-2 rounded-md bg-gray-700 text-white border border-gray-600">
+                <option value="QC Analyst">QC Analyst</option>
+                <option value="QC Manager">QC Manager</option>
+            </select>
+            <p id="user-id-display" class="text-xs text-gray-400 mt-2 break-all">User ID: N/A</p>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 p-8 overflow-y-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6">QC Trend Analyzer</h1>
+
+        <!-- Dashboard Panel -->
+        <section id="dashboard-panel" class="panel active">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Dashboard Overview</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="card p-6 text-center">
+                    <h3 class="text-lg font-medium text-gray-600">Total Batches Tested</h3>
+                    <p id="batches-tested-count" class="text-4xl font-bold text-blue-600 mt-2">0</p>
+                </div>
+                <div class="card p-6 text-center">
+                    <h3 class="text-lg font-medium text-gray-600">Total Deviations</h3>
+                    <p id="deviations-count" class="text-4xl font-bold text-red-600 mt-2">0</p>
+                </div>
+                <div class="card p-6 text-center">
+                    <h3 class="text-lg font-medium text-gray-600">Alerts Raised</h3>
+                    <p id="alerts-raised-count" class="text-4xl font-bold text-amber-500 mt-2">0</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div class="card p-6">
+                    <h3 class="text-xl font-semibold text-gray-700 mb-4">Product Average Values</h3>
+                    <div style="height: 300px;"><canvas id="productAvgChart"></canvas></div>
+                </div>
+                <div class="card p-6">
+                    <h3 class="text-xl font-semibold text-gray-700 mb-4" id="recentTrendChartTitle">Recent Trends</h3>
+                    <div style="height: 300px;"><canvas id="recentTrendChart"></canvas></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Data Entry Panel -->
+        <section id="data-entry-panel" class="panel">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">New QC Data Entry</h2>
+            <div class="card p-6">
+                <form id="data-entry-form" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="product-select" class="block text-sm font-medium text-gray-700">Product Name:</label>
+                        <select id="product-select" required></select>
+                    </div>
+                    <div>
+                        <label for="batch-no-input" class="block text-sm font-medium text-gray-700">Batch No.:</label>
+                        <input type="text" id="batch-no-input" placeholder="e.g., A-001" required>
+                    </div>
+                    <div>
+                        <label for="date-of-test-input" class="block text-sm font-medium text-gray-700">Date of Test:</label>
+                        <input type="date" id="date-of-test-input" required>
+                    </div>
+                    <div id="dv-input-group" style="display:none;">
+                        <label for="deliverable-volume-input" class="block text-sm font-medium text-gray-700">Deliverable Volume (mL):</label>
+                        <input type="number" step="0.01" id="deliverable-volume-input" placeholder="e.g., 10.05">
+                    </div>
+                    <div id="ph-input-group" style="display:none;">
+                        <label for="ph-input" class="block text-sm font-medium text-gray-700">pH:</label>
+                        <input type="number" step="0.01" id="ph-input" placeholder="e.g., 7.2">
+                    </div>
+                    <div id="assay-input-group" style="display:none;">
+                        <label for="assay-input" class="block text-sm font-medium text-gray-700">Assay (%):</label>
+                        <input type="number" step="0.01" id="assay-input" placeholder="e.g., 99.8">
+                    </div>
+                    <div class="md:col-span-2 flex justify-end space-x-3">
+                        <button type="button" id="simulate-upload-btn" class="btn-primary flex items-center">
+                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                            Simulate Upload
+                        </button>
+                        <button type="submit" class="btn-primary flex items-center">
+                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>
+                            Add Entry
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </section>
+
+        <!-- Trend Viewer Panel -->
+        <section id="trend-viewer-panel" class="panel">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">QC Trend Viewer</h2>
+            <div class="card p-6 mb-6">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label for="trend-product-select" class="block text-sm font-medium text-gray-700">Product:</label>
+                        <select id="trend-product-select"></select>
+                    </div>
+                    <div>
+                        <label for="trend-parameter-select" class="block text-sm font-medium text-gray-700">Parameter:</label>
+                        <select id="trend-parameter-select"></select>
+                    </div>
+                    <div>
+                        <label for="trend-date-range-select" class="block text-sm font-medium text-gray-700">Date Range:</label>
+                        <select id="trend-date-range-select">
+                            <option value="last-30-days">Last 30 Days</option>
+                            <option value="last-90-days">Last 90 Days</option>
+                            <option value="this-year">This Year</option>
+                            <option value="all">All Time</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="card p-6">
+                <h3 class="text-xl font-semibold text-gray-700 mb-4" id="trend-chart-title">Trend Chart</h3>
+                <div style="height: 400px;"><canvas id="trendChart"></canvas></div>
+            </div>
+        </section>
+
+        <!-- Report Generator Panel -->
+        <section id="report-generator-panel" class="panel">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">QC Report Generator</h2>
+            <div class="card p-6 mb-6" id="report-filters-container">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label for="filter-product-name" class="block text-sm font-medium text-gray-700">Product Name:</label>
+                        <input type="text" id="filter-product-name" placeholder="Filter by product">
+                    </div>
+                    <div>
+                        <label for="filter-batch-no" class="block text-sm font-medium text-gray-700">Batch No.:</label>
+                        <input type="text" id="filter-batch-no" placeholder="Filter by batch no.">
+                    </div>
+                    <div>
+                        <label for="filter-test-date" class="block text-sm font-medium text-gray-700">Test Date:</label>
+                        <input type="date" id="filter-test-date">
+                    </div>
+                    <div>
+                        <label for="filter-parameter" class="block text-sm font-medium text-gray-700">Parameter:</label>
+                        <select id="filter-parameter"></select>
+                    </div>
+                    <div>
+                        <label for="filter-status" class="block text-sm font-medium text-gray-700">Status:</label>
+                        <select id="filter-status">
+                            <option value="all">All Statuses</option>
+                            <option value="In-Spec">In-Spec</option>
+                            <option value="Out-of-Spec">Out-of-Spec</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end">
+                        <button type="button" id="apply-filters-btn" class="btn-primary w-full">Apply Filters</button>
+                    </div>
+                </div>
+            </div>
+            <div class="card p-6">
+                <div class="flex justify-end space-x-3 mb-4">
+                    <button type="button" id="export-csv-btn" class="btn-primary flex items-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13l-3 3m0 0l-3-3m3 3V4m0 13a3 3 0 110-6 3 3 0 010 6z"></path></svg>
+                        Export CSV
+                    </button>
+                    <button type="button" id="export-pdf-btn" class="btn-primary flex items-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        Export PDF
+                    </button>
+                    <button type="button" id="email-report-btn" class="btn-primary flex items-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8m-2 4v4a2 2 0 01-2 2H7a2 2 0 01-2-2v-4m0-7l.487-.325A2 2 0 016.431 4H17.57a2 2 0 011.943 2.675L21 8"></path></svg>
+                        Email Report
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead>
+                            <tr>
+                                <th>Product Name</th>
+                                <th>Batch No.</th>
+                                <th>Test Date</th>
+                                <th>Parameter</th>
+                                <th>Value</th>
+                                <th>Status</th>
+                                <th>QC Analyst</th>
+                                <th class="edit-delete-column">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="report-table-body" class="bg-white divide-y divide-gray-200">
+                            <!-- Report data will be loaded here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Audit Trail Panel -->
+        <section id="audit-trail-panel" class="panel">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Audit Trail</h2>
+            <div class="card p-6">
+                <ul id="audit-log-list" class="space-y-3">
+                    <!-- Audit log entries will be loaded here -->
+                </ul>
+            </div>
+        </section>
+
+        <!-- Add Product Panel -->
+        <section id="add-product-panel" class="panel">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Manage Product Limits</h2>
+            <div class="card p-6 mb-6">
+                <form id="add-product-form">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label for="new-product-name-input" class="block text-sm font-medium text-gray-700">Product Name:</label>
+                            <input type="text" id="new-product-name-input" placeholder="e.g., Injectable Product A (Vial 10mL)" required>
+                        </div>
+                        <div class="md:col-span-2">
+                            <h3 class="text-lg font-medium text-gray-700 mt-4 mb-2">Deliverable Volume (mL) Limits:</h3>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label for="dv-ucl-input" class="block text-sm font-medium text-gray-700">UCL:</label>
+                                    <input type="number" step="0.01" id="dv-ucl-input" placeholder="e.g., 10.2" required>
+                                </div>
+                                <div>
+                                    <label for="dv-lcl-input" class="block text-sm font-medium text-gray-700">LCL:</label>
+                                    <input type="number" step="0.01" id="dv-lcl-input" placeholder="e.g., 9.8" required>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="md:col-span-2">
+                            <h3 class="text-lg font-medium text-gray-700 mt-4 mb-2">pH Limits:</h3>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label for="ph-ucl-input" class="block text-sm font-medium text-gray-700">UCL:</label>
+                                    <input type="number" step="0.01" id="ph-ucl-input" placeholder="e.g., 7.5" required>
+                                </div>
+                                <div>
+                                    <label for="ph-lcl-input" class="block text-sm font-medium text-gray-700">LCL:</label>
+                                    <input type="number" step="0.01" id="ph-lcl-input" placeholder="e.g., 6.5" required>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="md:col-span-2">
+                            <h3 class="text-lg font-medium text-gray-700 mt-4 mb-2">Assay (%) Limits:</h3>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label for="assay-ucl-input" class="block text-sm font-medium text-gray-700">UCL:</label>
+                                    <input type="number" step="0.01" id="assay-ucl-input" placeholder="e.g., 102.0" required>
+                                </div>
+                                <div>
+                                    <label for="assay-lcl-input" class="block text-sm font-medium text-gray-700">LCL:</label>
+                                    <input type="number" step="0.01" id="assay-lcl-input" placeholder="e.g., 98.0" required>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex justify-end mt-6 space-x-3">
+                        <button type="button" id="reset-add-product-btn" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded transition-all duration-300" onclick="resetAddProductForm()">Reset</button>
+                        <button type="submit" id="add-product-submit-btn" class="btn-primary">Add Product</button>
+                    </div>
+                </form>
+            </div>
+
+            <h3 class="text-xl font-semibold text-gray-700 mb-4">Existing Product Limits</h3>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead>
+                        <tr>
+                            <th>Product Name</th>
+                            <th>Deliverable Volume (mL) Limits</th>
+                            <th>pH Limits</th>
+                            <th>Assay (%) Limits</th>
+                            <th class="product-crud-column">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="product-limits-table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Product limits will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
 </body>
 </html>
