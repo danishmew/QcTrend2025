@@ -16,25 +16,27 @@
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <!-- jsPDF CDN for simulated PDF export -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <!-- Firebase SDKs -->
+    
+
+<!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // YOUR FIREBASE PROJECT CONFIGURATION (Moved to global scope)
-        const firebaseConfig = {
-            apiKey: "AIzaSyCoF18wrBpmPR4DjbXtfjX6Rq7qsbSo6Nw",
-            authDomain: "qc-trends2025.firebaseapp.com",
-            projectId: "qc-trends2025",
-            storageBucket: "qc-trends2025.firebasestorage.app",
-            messagingSenderId: "559879485741",
-            appId: "1:559879485741:web:9f6aefe16a720e0da3fba4"
-        };
-        // Correctly set using the appId from your config
-        const appId = firebaseConfig.appId; 
-        console.log("Firebase Config being used:", firebaseConfig);
+        // Use the Firebase config and app ID provided by the Canvas environment
+	const firebaseConfig = {
+  	apiKey: "AIzaSyCoF18wrBpmPR4DjbXtfjX6Rq7qsbSo6Nw",
+	authDomain: "qc-trends2025.firebaseapp.com",
+ 	projectId: "qc-trends2025",
+ 	storageBucket: "qc-trends2025.firebasestorage.app",
+  	messagingSenderId: "559879485741",
+  	appId: "1:559879485741:web:9f6aefe16a720e0da3fba4",
+  	measurementId: "G-4TEL9HPCVT"
+	};
 
+
+        console.log("App ID being used:", appId);
 
         // Global Firebase variables (will be initialized on DOMContentLoaded)
         window.firebaseApp = null;
@@ -125,16 +127,27 @@
                 filterReportData();
             });
 
-            // Check if Firebase config is present (basic check)
-            if (firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId) {
+            // Check if Firebase config is present and valid
+            if (firebaseConfig && firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId) {
                 window.firebaseApp = initializeApp(firebaseConfig);
                 window.db = getFirestore(window.firebaseApp);
                 window.auth = getAuth(window.firebaseApp);
 
-                // In a deployed environment, __initial_auth_token will not exist.
-                // We'll sign in anonymously by default.
-                await signInAnonymously(window.auth);
-                console.log("Signed in anonymously.");
+                // Handle authentication using __initial_auth_token or signInAnonymously
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    try {
+                        await signInWithCustomToken(window.auth, __initial_auth_token);
+                        console.log("Signed in with custom token.");
+                    } catch (error) {
+                        console.error("Error signing in with custom token:", error);
+                        // Fallback to anonymous if custom token fails
+                        await signInAnonymously(window.auth);
+                        console.log("Signed in anonymously after custom token failure.");
+                    }
+                } else {
+                    await signInAnonymously(window.auth);
+                    console.log("Signed in anonymously.");
+                }
 
                 onAuthStateChanged(window.auth, (user) => {
                     if (user) {
@@ -152,11 +165,11 @@
                     setupFirestoreListeners(); // Call setupFirestoreListeners once auth is ready
                 });
             } else {
-                console.warn("Firebase config is incomplete. Running in local-only mode (data will not persist).");
+                console.warn("Firebase config is incomplete or missing. Running in local-only mode (data will not persist).");
                 Swal.fire({
                     icon: 'warning',
                     title: 'Firebase Not Configured',
-                    html: 'Firebase configuration is incomplete. The application will run in local-only mode, and data will NOT be saved persistently. Please ensure your `firebaseConfig` object has all necessary properties.',
+                    html: 'Firebase configuration is incomplete or missing. The application will run in local-only mode, and data will NOT be saved persistently. This usually happens if the environment variables are not properly set or if the app is run outside the Canvas environment. Please ensure your Firebase project is correctly set up and linked.',
                     confirmButtonText: 'Understood',
                     customClass: {
                         confirmButton: 'bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all duration-300'
@@ -179,9 +192,6 @@
                 console.warn("Firestore or Auth not ready, skipping listener setup.");
                 return;
             }
-
-            // Use the appId from the firebaseConfig directly for consistency
-            // const appId = firebaseConfig.appId; // This is already defined globally at the top of the script
 
             // Listener for QC Data
             const qcCollectionRef = collection(window.db, `artifacts/${appId}/public/data/qc_entries`);
@@ -261,7 +271,7 @@
                 return;
             }
             try {
-                // const appId = firebaseConfig.appId; // Use appId from the firebaseConfig directly
+                // const appId = firebaseConfig.appId; // Already globally defined
                 await addDoc(collection(window.db, `artifacts/${appId}/users/${window.userId}/audit_logs`), {
                     timestamp: new Date().toISOString(),
                     user: window.currentUserRole,
@@ -494,7 +504,7 @@
 
             } catch (e) {
                 console.error("Error adding document: ", e);
-                Swal.fire('Error', 'Failed to add data. Please try again.', 'error');
+                Swal.fire('Error', `Failed to add data: ${e.message}. Please try again.`, 'error'); // More specific error message
             }
         }
 
@@ -580,7 +590,7 @@
 
             } catch (e) {
                 console.error("Error simulating upload: ", e);
-                Swal.fire('Error', 'Failed to simulate upload. Check console for details.', 'error');
+                Swal.fire('Error', `Failed to simulate upload: ${e.message}. Check console for details.`, 'error'); // More specific error message
             }
         }
 
@@ -1091,7 +1101,7 @@
                         logAudit(`Edited data for Batch: ${oldEntry.batchNo}, Product: ${oldEntry.product}, Parameter: ${oldEntry.parameter}. Changed from Value: ${oldEntry.value} to ${value}. Status: ${updatedFields.status}`);
                     } catch (e) {
                         console.error("Error updating document: ", e);
-                        Swal.fire('Error', 'Failed to update data. Please try again.', 'error');
+                        Swal.fire('Error', `Failed to update data: ${e.message}. Please try again.`, 'error'); // More specific error message
                     }
                 }
             });
@@ -1134,7 +1144,7 @@
                         }
                     } catch (e) {
                         console.error("Error deleting document: ", e);
-                        Swal.fire('Error', 'Failed to delete data. Please try again.', 'error');
+                        Swal.fire('Error', `Failed to delete data: ${e.message}. Please try again.`, 'error'); // More specific error message
                     }
                 }
             });
@@ -1456,7 +1466,7 @@
 
             } catch (e) {
                 console.error("Error adding/updating product document: ", e);
-                Swal.fire('Error', 'Failed to add/update product. Please try again.', 'error');
+                Swal.fire('Error', `Failed to add/update product: ${e.message}. Please try again.`, 'error'); // More specific error message
             }
         }
 
@@ -1601,7 +1611,7 @@
 
                     } catch (e) {
                         console.error("Error deleting product and associated data: ", e);
-                        Swal.fire('Error', 'Failed to delete product and its data. Please try again.', 'error');
+                        Swal.fire('Error', `Failed to delete product and its data: ${e.message}. Please try again.`, 'error'); // More specific error message
                     }
                 }
             });
